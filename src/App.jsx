@@ -1,29 +1,29 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X } from 'lucide-react';
+import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter } from 'lucide-react';
 
 // --- 工具函数 ---
 const generateId = () => Math.random().toString(36).substr(2, 9);
 const IS_MAC = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
-// 解决浮点数相加精度问题 (如 0.1 + 0.2 = 0.30000000000000004)
+// 解决浮点数相加精度问题
 const roundResource = (num) => Math.round(num * 10) / 10;
 
 // --- 初始极简模板数据 ---
 const emptyTemplate = {
-  targetColumnWidth: 200,
+  targetColumnWidth: 260,
   months: [
-    { id: 'm1', name: '阶段 1', goal: '在此输入该阶段的核心目标...' }
+    { id: 'm1', name: '阶段 1', goal: '在此输入该阶段的核心目标\n1. 第一个拆解的关键事项\n2. 第二个拆解的关键事项' }
   ],
   sprints: [
     { id: 's1-1', monthId: 'm1', name: '迭代 1', width: 256 },
     { id: 's1-2', monthId: 'm1', name: '迭代 2', width: 256 }
   ],
   swimlanes: [
-    { id: 'sw1', name: '业务线 A', collapsed: false },
-    { id: 'sw2', name: '业务线 B', collapsed: false }
+    { id: 'sw1', name: '业务线 A\n1. 底层能力建设\n2. 历史遗留问题清扫', collapsed: false },
+    { id: 'sw2', name: '业务线 B\n1. 客户交付特性', collapsed: false }
   ],
   tasks: [
-    { id: 't1', sprintId: 's1-1', swimlaneId: 'sw1', text: '规划阶段核心需求', order: 1, resources: { fe: '', be: '', qa: '', pd: '0.5' } }
+    { id: 't1', sprintId: 's1-1', swimlaneId: 'sw1', text: '规划阶段核心需求', order: 1, resources: { fe: '', be: '', qa: '', s: '0.5', j: '' } }
   ]
 };
 
@@ -35,6 +35,9 @@ export default function AgileMatrixApp() {
   const [isSaving, setIsSaving] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   
+  // 视图筛选状态 (更新了 s 和 j)
+  const [filters, setFilters] = useState({ fe: true, be: true, qa: true, s: true, j: true });
+
   // 文件系统状态
   const [fileHandle, setFileHandle] = useState(null);
   const [fileName, setFileName] = useState('未命名排期模板.json');
@@ -44,11 +47,15 @@ export default function AgileMatrixApp() {
   const [history, setHistory] = useState([]);
   const [draggedItem, setDraggedItem] = useState(null);
 
+  // 复制粘贴与焦点追踪 Ref
+  const hoveredTaskRef = useRef(null);
+  const hoveredCellRef = useRef(null);
+  const copiedTaskRef = useRef(null);
+
   // --- 状态更新与历史记录封装 ---
   const updateData = useCallback((action) => {
     setData(prev => {
       const nextData = typeof action === 'function' ? action(prev) : action;
-      // 支持最近 50 次操作历史
       setHistory(h => [...h, prev].slice(-50)); 
       return nextData;
     });
@@ -58,19 +65,36 @@ export default function AgileMatrixApp() {
   const confirmModal = (message, onConfirm) => setModalConfig({ type: 'confirm', message, onConfirm });
   const alertModal = (message) => setModalConfig({ type: 'alert', message });
 
-  const showToast = (msg) => {
+  const showToast = useCallback((msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
-  };
+  }, []);
 
-  // --- 本地文件系统 API (File System Access API) ---
+  // --- 复制粘贴核心功能 ---
+  const pasteTask = useCallback((sprintId, swimlaneId, template) => {
+    updateData(prevData => {
+      const targetCellTasks = prevData.tasks.filter(t => t.sprintId === sprintId && t.swimlaneId === swimlaneId);
+      const newOrder = targetCellTasks.length > 0 ? Math.max(...targetCellTasks.map(t => t.order)) + 1 : 1;
+      const newTask = { 
+        ...template, 
+        id: generateId(), 
+        sprintId, 
+        swimlaneId, 
+        order: newOrder,
+        resources: template.resources ? { ...template.resources } : { fe: '', be: '', qa: '', s: '', j: '' }
+      };
+      return { ...prevData, tasks: [...prevData.tasks, newTask] };
+    });
+    showToast('已粘贴事项');
+  }, [updateData, showToast]);
+
+  // --- 持久化与文件系统操作 ---
   const handleNew = async () => {
     try {
       const handle = await window.showSaveFilePicker({
         types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
         suggestedName: '新建排期矩阵.json',
       });
-      
       const writable = await handle.createWritable();
       await writable.write(JSON.stringify(emptyTemplate, null, 2));
       await writable.close();
@@ -82,9 +106,7 @@ export default function AgileMatrixApp() {
       setIsDirty(false);
       showToast('新建文件成功');
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        alertModal('新建文件失败。请确保使用 Chrome/Edge 等现代浏览器。错误: ' + err.message);
-      }
+      if (err.name !== 'AbortError') alertModal('新建文件失败。错误: ' + err.message);
     }
   };
 
@@ -93,7 +115,6 @@ export default function AgileMatrixApp() {
       const [handle] = await window.showOpenFilePicker({
         types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
       });
-      
       const file = await handle.getFile();
       const content = await file.text();
       const parsed = JSON.parse(content);
@@ -109,19 +130,15 @@ export default function AgileMatrixApp() {
         alertModal('导入失败：文件格式不符合排期矩阵的数据结构。');
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
-         alertModal('打开文件失败: ' + err.message);
-      }
+      if (err.name !== 'AbortError') alertModal('打开文件失败: ' + err.message);
     }
   };
 
   const handleSave = useCallback(async () => {
-    if (!isDirty && fileHandle) return; // 已保存且有文件句柄时，无需重复操作
-    
+    if (!isDirty && fileHandle) return;
     setIsSaving(true);
     try {
       let handle = fileHandle;
-      
       if (!handle) {
         handle = await window.showSaveFilePicker({
           types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
@@ -135,7 +152,6 @@ export default function AgileMatrixApp() {
           if (permission !== 'granted') throw new Error('未获得写入权限');
         }
       }
-
       const writable = await handle.createWritable();
       await writable.write(JSON.stringify(data, null, 2));
       await writable.close();
@@ -143,13 +159,11 @@ export default function AgileMatrixApp() {
       setIsDirty(false);
       showToast('保存成功');
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        alertModal('保存失败: ' + err.message);
-      }
+      if (err.name !== 'AbortError') alertModal('保存失败: ' + err.message);
     } finally {
       setIsSaving(false);
     }
-  }, [data, isDirty, fileHandle, fileName]);
+  }, [data, isDirty, fileHandle, fileName, showToast]);
 
   const handleUndo = useCallback(() => {
     if (history.length === 0) return;
@@ -158,10 +172,26 @@ export default function AgileMatrixApp() {
     setHistory(prev => prev.slice(0, -1));
     setIsDirty(true);
     showToast('已撤销');
-  }, [history]);
+  }, [history, showToast]);
 
+  // 全局快捷键注册
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if (hoveredTaskRef.current) {
+          e.preventDefault();
+          copiedTaskRef.current = hoveredTaskRef.current;
+          showToast('已复制事项卡片');
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (copiedTaskRef.current && hoveredCellRef.current) {
+          e.preventDefault();
+          pasteTask(hoveredCellRef.current.sprintId, hoveredCellRef.current.swimlaneId, copiedTaskRef.current);
+        }
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         handleSave();
@@ -173,7 +203,7 @@ export default function AgileMatrixApp() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave, handleUndo]);
+  }, [handleSave, handleUndo, pasteTask, showToast]);
 
   useEffect(() => {
     const handleBeforeUnload = (e) => {
@@ -185,6 +215,44 @@ export default function AgileMatrixApp() {
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isDirty]);
+
+  // --- 过滤展示数据逻辑 ---
+  const visibleTasks = data.tasks.filter(task => {
+    const r = task.resources || {};
+    const hasFe = parseFloat(r.fe||0) > 0;
+    const hasBe = parseFloat(r.be||0) > 0;
+    const hasQa = parseFloat(r.qa||0) > 0;
+    const hasS = parseFloat(r.s||0) > 0;
+    const hasJ = parseFloat(r.j||0) > 0;
+
+    if (!hasFe && !hasBe && !hasQa && !hasS && !hasJ) return true;
+    return (hasFe && filters.fe) || (hasBe && filters.be) || (hasQa && filters.qa) || (hasS && filters.s) || (hasJ && filters.j);
+  });
+
+  // --- 聚合当前迭代的总资源 ---
+  const getSprintTotalResourcesText = (sprintId) => {
+    const sprintTasks = visibleTasks.filter(t => t.sprintId === sprintId);
+    let fe = 0, be = 0, qa = 0, s = 0, j = 0;
+    
+    sprintTasks.forEach(t => {
+      if (t.resources) {
+        fe += parseFloat(t.resources.fe || 0);
+        be += parseFloat(t.resources.be || 0);
+        qa += parseFloat(t.resources.qa || 0);
+        s += parseFloat(t.resources.s || 0);
+        j += parseFloat(t.resources.j || 0);
+      }
+    });
+
+    const parts = [];
+    if (fe > 0) parts.push(`前${roundResource(fe)}`);
+    if (be > 0) parts.push(`后${roundResource(be)}`);
+    if (qa > 0) parts.push(`测${roundResource(qa)}`);
+    if (s > 0) parts.push(`S${roundResource(s)}`);
+    if (j > 0) parts.push(`J${roundResource(j)}`);
+
+    return parts.length > 0 ? parts.join(' ') : null;
+  };
 
   // --- 列宽调整逻辑 ---
   const handleResizeStart = (e, targetId, isTargetColumn = false) => {
@@ -205,7 +273,6 @@ export default function AgileMatrixApp() {
       document.body.style.userSelect = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
-
       const finalWidth = Math.max(isTargetColumn ? 120 : 160, startWidth + (upEvent.clientX - startX));
       
       setColumnWidths(prev => {
@@ -223,7 +290,6 @@ export default function AgileMatrixApp() {
         }));
       }
     };
-
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   };
@@ -260,7 +326,6 @@ export default function AgileMatrixApp() {
         const taskIndex = newTasks.findIndex(nt => nt.id === t.id);
         newTasks[taskIndex].order = index + 1;
       });
-
       return { ...prevData, tasks: newTasks };
     });
   };
@@ -293,7 +358,6 @@ export default function AgileMatrixApp() {
           const idx = newTasks.findIndex(nt => nt.id === t.id);
           newTasks[idx].order = index + 1;
       });
-
       return { ...prevData, tasks: newTasks };
     });
   };
@@ -309,7 +373,7 @@ export default function AgileMatrixApp() {
         swimlaneId, 
         text: '新事项', 
         order: newOrder,
-        resources: { fe: '', be: '', qa: '', pd: '' } 
+        resources: { fe: '', be: '', qa: '', s: '', j: '' } 
       };
       return { ...prevData, tasks: [...prevData.tasks, newTask] };
     });
@@ -359,7 +423,7 @@ export default function AgileMatrixApp() {
   const addMonth = () => {
     updateData(prevData => {
       const newMonthId = generateId();
-      const newMonth = { id: newMonthId, name: '新阶段', goal: '阶段目标...' };
+      const newMonth = { id: newMonthId, name: '新阶段', goal: '阶段核心目标...' };
       const newSprint = { id: generateId(), monthId: newMonthId, name: '新迭代', width: 256 };
       return { ...prevData, months: [...prevData.months, newMonth], sprints: [...prevData.sprints, newSprint] };
     });
@@ -410,7 +474,7 @@ export default function AgileMatrixApp() {
   const addSwimlane = () => {
     updateData(prev => ({
       ...prev,
-      swimlanes: [...prev.swimlanes, { id: generateId(), name: '新增业务线 / 目标', collapsed: false }]
+      swimlanes: [...prev.swimlanes, { id: generateId(), name: '新增目标\n1. 新子事项', collapsed: false }]
     }));
   };
 
@@ -424,38 +488,11 @@ export default function AgileMatrixApp() {
     });
   };
 
-  // --- 聚合当前迭代的总资源 ---
-  const getSprintTotalResourcesText = (sprintId) => {
-    const sprintTasks = data.tasks.filter(t => t.sprintId === sprintId);
-    let fe = 0, be = 0, qa = 0, pd = 0;
-    
-    sprintTasks.forEach(t => {
-      if (t.resources) {
-        fe += parseFloat(t.resources.fe || 0);
-        be += parseFloat(t.resources.be || 0);
-        qa += parseFloat(t.resources.qa || 0);
-        pd += parseFloat(t.resources.pd || 0);
-      }
-    });
-
-    fe = roundResource(fe);
-    be = roundResource(be);
-    qa = roundResource(qa);
-    pd = roundResource(pd);
-
-    const parts = [];
-    if (fe > 0) parts.push(`前${fe}`);
-    if (be > 0) parts.push(`后${be}`);
-    if (qa > 0) parts.push(`测${qa}`);
-    if (pd > 0) parts.push(`规${pd}`);
-
-    return parts.length > 0 ? parts.join(' ') : null;
-  };
-
   const currentTargetColWidth = columnWidths['targetCol'] || data.targetColumnWidth || 200;
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-sm font-sans text-slate-800">
+
       {/* 弹窗遮罩 */}
       {modalConfig && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm transition-opacity">
@@ -466,22 +503,9 @@ export default function AgileMatrixApp() {
             </div>
             <div className="flex justify-end gap-3 mt-6">
               {modalConfig.type === 'confirm' && (
-                <button
-                  onClick={() => setModalConfig(null)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium"
-                >
-                  取消
-                </button>
+                <button onClick={() => setModalConfig(null)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium">取消</button>
               )}
-              <button
-                onClick={() => {
-                  if (modalConfig.onConfirm) modalConfig.onConfirm();
-                  setModalConfig(null);
-                }}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm font-medium"
-              >
-                确定
-              </button>
+              <button onClick={() => { if (modalConfig.onConfirm) modalConfig.onConfirm(); setModalConfig(null); }} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm font-medium">确定</button>
             </div>
           </div>
         </div>
@@ -489,15 +513,36 @@ export default function AgileMatrixApp() {
 
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-300 shadow-sm z-50">
-        <div className="flex flex-col">
+        <div className="flex flex-col flex-1">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-slate-800">敏捷全景排期矩阵</h1>
             {isDirty && (
               <span className="flex items-center text-orange-600 text-xs font-semibold px-2.5 py-0.5 bg-orange-50 rounded-full border border-orange-200">
-                <AlertCircle size={14} className="mr-1" />
-                未保存
+                <AlertCircle size={14} className="mr-1" />未保存
               </span>
             )}
+
+            {/* 视图筛选复选框组 */}
+            <div className="flex items-center gap-3 ml-4 pl-4 border-l border-slate-200">
+              <span className="flex items-center gap-1 text-xs text-slate-400 font-medium">
+                <Filter size={12} /> 视图过滤
+              </span>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-blue-600 transition-colors">
+                <input type="checkbox" checked={filters.fe} onChange={e=>setFilters({...filters, fe: e.target.checked})} className="accent-blue-500 rounded-sm w-3 h-3"/> 前
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-indigo-600 transition-colors">
+                <input type="checkbox" checked={filters.be} onChange={e=>setFilters({...filters, be: e.target.checked})} className="accent-indigo-500 rounded-sm w-3 h-3"/> 后
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-emerald-600 transition-colors">
+                <input type="checkbox" checked={filters.qa} onChange={e=>setFilters({...filters, qa: e.target.checked})} className="accent-emerald-500 rounded-sm w-3 h-3"/> 测
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-purple-600 transition-colors">
+                <input type="checkbox" checked={filters.s} onChange={e=>setFilters({...filters, s: e.target.checked})} className="accent-purple-500 rounded-sm w-3 h-3"/> S
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-pink-600 transition-colors">
+                <input type="checkbox" checked={filters.j} onChange={e=>setFilters({...filters, j: e.target.checked})} className="accent-pink-500 rounded-sm w-3 h-3"/> J
+              </label>
+            </div>
           </div>
           <span className="text-xs text-slate-400 mt-1 flex items-center gap-1 font-medium">
              <div className="w-1.5 h-1.5 rounded-full bg-blue-400"></div>
@@ -508,40 +553,19 @@ export default function AgileMatrixApp() {
         <div className="flex items-center gap-2">
           {/* 文件系统操作按钮组 */}
           <div className="flex items-center bg-slate-100 rounded-lg p-1 mr-2 border border-slate-200">
-            <button
-              onClick={handleNew}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm"
-              title="新建空白排期文件"
-            >
+            <button onClick={handleNew} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="新建空白排期文件">
               <FilePlus size={14} /> 新建
             </button>
             <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
-            <button
-              onClick={handleOpen}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm"
-              title="打开本地 JSON 数据"
-            >
+            <button onClick={handleOpen} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="打开本地 JSON 数据">
               <FolderOpen size={14} /> 打开
             </button>
           </div>
 
-          <button
-            onClick={handleUndo}
-            disabled={history.length === 0}
-            className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-            title={`撤销 (${IS_MAC ? 'Cmd' : 'Ctrl'}+Z)`}
-          >
+          <button onClick={handleUndo} disabled={history.length === 0} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg disabled:opacity-30 disabled:hover:bg-transparent transition-colors" title={`撤销 (${IS_MAC ? 'Cmd' : 'Ctrl'}+Z)`}>
             <Undo size={18} />
           </button>
-          <button
-            onClick={handleSave}
-            disabled={!isDirty && fileHandle !== null}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm
-              ${(!isDirty && fileHandle !== null)
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
-                : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'
-              }`}
-          >
+          <button onClick={handleSave} disabled={!isDirty && fileHandle !== null} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${(!isDirty && fileHandle !== null) ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'}`}>
             <Save size={16} />
             {isSaving ? '保存中...' : `保存 (${IS_MAC ? 'Cmd' : 'Ctrl'}+S)`}
           </button>
@@ -566,13 +590,10 @@ export default function AgileMatrixApp() {
                 className="sticky left-0 top-0 z-40 bg-slate-100 border-b-2 border-slate-300 border-r-2 border-r-slate-400 shadow-[4px_0_6px_-2px_rgba(0,0,0,0.08)] relative"
                 style={{ width: currentTargetColWidth, minWidth: currentTargetColWidth }}
               >
-                <div className="flex justify-center items-center h-full p-3 font-bold text-slate-700">
-                  目标
-                </div>
+                <div className="flex justify-center items-center h-full p-3 font-bold text-slate-700">目标</div>
                 <div 
                   className="absolute right-0 top-0 bottom-0 w-[6px] cursor-col-resize hover:bg-blue-400 active:bg-blue-600 z-50 transition-colors"
                   onMouseDown={(e) => handleResizeStart(e, 'targetCol', true)}
-                  title="拖拽调整目标列宽"
                 />
               </th>
               {data.months.map(month => {
@@ -587,21 +608,18 @@ export default function AgileMatrixApp() {
                            className="outline-none text-center hover:bg-slate-200 rounded px-2 transition-colors"
                         />
                         <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover/month:opacity-100 flex items-center gap-1 transition-opacity">
-                          <button onClick={() => addSprint(month.id)} className="p-1 text-slate-500 hover:text-blue-600 bg-white shadow-sm rounded border border-slate-300" title="新增迭代">
-                            <Plus size={14} />
-                          </button>
-                          <button onClick={() => deleteMonth(month.id)} className="p-1 text-slate-500 hover:text-red-500 bg-white shadow-sm rounded border border-slate-300" title="删除该阶段">
-                            <Trash2 size={14} />
-                          </button>
+                          <button onClick={() => addSprint(month.id)} className="p-1 text-slate-500 hover:text-blue-600 bg-white shadow-sm rounded border border-slate-300" title="新增迭代"><Plus size={14} /></button>
+                          <button onClick={() => deleteMonth(month.id)} className="p-1 text-slate-500 hover:text-red-500 bg-white shadow-sm rounded border border-slate-300" title="删除该阶段"><Trash2 size={14} /></button>
                         </div>
                       </div>
-                      <div className="p-2 flex-1">
+                      <div className="p-2 flex-1 flex justify-center">
                         <EditableText 
                            value={month.goal} 
                            onChange={(val) => updateGoalText('month', month.id, val)}
-                           className="w-full text-xs text-slate-600 outline-none resize-none bg-transparent hover:bg-slate-100 p-1.5 rounded transition-colors"
+                           className="w-full text-xs text-slate-600 outline-none resize-none bg-transparent hover:bg-slate-100 p-1.5 rounded transition-colors text-center"
                            placeholder="输入阶段目标..."
                            multiline
+                           formatAsGoal={true}
                         />
                       </div>
                     </div>
@@ -609,9 +627,7 @@ export default function AgileMatrixApp() {
                 );
               })}
               <th className="bg-slate-100 border border-slate-300 w-12 hover:bg-blue-50 cursor-pointer transition-colors group" rowSpan={2} onClick={addMonth} title="新增阶段">
-                <div className="flex justify-center items-center h-full text-slate-400 group-hover:text-blue-600">
-                  <Plus size={24} />
-                </div>
+                <div className="flex justify-center items-center h-full text-slate-400 group-hover:text-blue-600"><Plus size={24} /></div>
               </th>
             </tr>
             {/* Sprints Row */}
@@ -619,8 +635,7 @@ export default function AgileMatrixApp() {
               <th 
                 className="sticky left-0 z-40 bg-slate-100 border-b border-slate-300 border-r-2 border-r-slate-400 shadow-[4px_0_6px_-2px_rgba(0,0,0,0.08)]"
                 style={{ width: currentTargetColWidth, minWidth: currentTargetColWidth }}
-              >
-              </th>
+              ></th>
               {data.sprints.map(sprint => {
                 const cellWidth = columnWidths[sprint.id] || sprint.width || 256;
                 const totalResText = getSprintTotalResourcesText(sprint.id);
@@ -643,23 +658,11 @@ export default function AgileMatrixApp() {
                            <Users size={10} /> {totalResText}
                         </div>
                       ) : (
-                        <div className="h-4"></div> /* 占位符保持高度对齐 */
+                        <div className="h-4"></div>
                       )}
                     </div>
-
-                    <button 
-                      onClick={() => deleteSprint(sprint.id)} 
-                      className="absolute right-3 top-1/2 -translate-y-1/2 opacity-0 group-hover/sprint:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-opacity bg-white shadow-sm border border-slate-200 rounded"
-                      title="删除该迭代"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                    {/* 拖拽调整宽度的热区 */}
-                    <div 
-                      className="absolute right-0 top-0 bottom-0 w-[6px] cursor-col-resize hover:bg-blue-400 active:bg-blue-600 z-50 transition-colors"
-                      onMouseDown={(e) => handleResizeStart(e, sprint.id)}
-                      title="拖拽调整列宽"
-                    />
+                    <button onClick={() => deleteSprint(sprint.id)} className="absolute right-3 top-1/2 -translate-y-1/2 opacity-0 group-hover/sprint:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-opacity bg-white shadow-sm border border-slate-200 rounded"><Trash2 size={14} /></button>
+                    <div className="absolute right-0 top-0 bottom-0 w-[6px] cursor-col-resize hover:bg-blue-400 active:bg-blue-600 z-50 transition-colors" onMouseDown={(e) => handleResizeStart(e, sprint.id)}/>
                   </th>
                 );
               })}
@@ -676,10 +679,7 @@ export default function AgileMatrixApp() {
                     style={{ width: currentTargetColWidth, minWidth: currentTargetColWidth }}
                   >
                     <div className="p-3 flex items-start gap-1">
-                      <button 
-                        onClick={() => toggleSwimlane(swimlane.id)}
-                        className="mt-0.5 text-slate-400 hover:text-slate-700 transition-colors shrink-0 bg-slate-100 rounded hover:bg-slate-200"
-                      >
+                      <button onClick={() => toggleSwimlane(swimlane.id)} className="mt-0.5 text-slate-400 hover:text-slate-700 transition-colors shrink-0 bg-slate-100 rounded hover:bg-slate-200">
                         {swimlane.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
                       </button>
                       <div className="flex-1 relative">
@@ -688,21 +688,17 @@ export default function AgileMatrixApp() {
                            onChange={(val) => updateGoalText('swimlane', swimlane.id, val)}
                            className="font-bold text-slate-800 text-sm outline-none resize-none bg-transparent hover:bg-slate-100 p-1.5 rounded w-full pr-6"
                            multiline
+                           formatAsGoal={true}
                         />
-                        <button 
-                          onClick={() => deleteSwimlane(swimlane.id)} 
-                          className="absolute right-0 top-0 opacity-0 group-hover/swimlane:opacity-100 p-1.5 text-slate-400 hover:text-red-500 bg-white rounded shadow-sm border border-slate-300"
-                          title="删除该横向目标"
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                        <button onClick={() => deleteSwimlane(swimlane.id)} className="absolute right-0 top-0 opacity-0 group-hover/swimlane:opacity-100 p-1.5 text-slate-400 hover:text-red-500 bg-white rounded shadow-sm border border-slate-300"><Trash2 size={14} /></button>
                       </div>
                     </div>
                   </td>
 
                   {/* 矩阵格子 */}
                   {data.sprints.map(sprint => {
-                    const cellTasks = data.tasks
+                    // 使用过滤后的可见任务列表进行渲染
+                    const cellTasks = visibleTasks
                       .filter(t => t.sprintId === sprint.id && t.swimlaneId === swimlane.id)
                       .sort((a, b) => a.order - b.order);
                     
@@ -718,6 +714,7 @@ export default function AgileMatrixApp() {
                           sprintId={sprint.id} 
                           swimlaneId={swimlane.id}
                           onDrop={handleDropOnCell}
+                          onMouseEnter={() => hoveredCellRef.current = { sprintId: sprint.id, swimlaneId: swimlane.id }}
                         >
                           <div className="flex flex-col gap-2.5 min-h-[60px]">
                             {cellTasks.map(task => (
@@ -730,6 +727,8 @@ export default function AgileMatrixApp() {
                                 onUpdateText={updateTaskText}
                                 onUpdateResources={updateTaskResources}
                                 onDelete={deleteTask}
+                                onMouseEnter={() => hoveredTaskRef.current = task}
+                                onMouseLeave={() => { if(hoveredTaskRef.current?.id === task.id) hoveredTaskRef.current = null; }}
                               />
                             ))}
                             
@@ -756,10 +755,7 @@ export default function AgileMatrixApp() {
                 className="sticky left-0 z-20 bg-white border border-slate-300 border-r-2 border-r-slate-400 shadow-[4px_0_6px_-2px_rgba(0,0,0,0.08)] p-0"
                 style={{ width: currentTargetColWidth, minWidth: currentTargetColWidth }}
               >
-                <button 
-                  onClick={addSwimlane} 
-                  className="w-full h-full flex items-center justify-center gap-2 p-3.5 text-sm text-slate-500 font-medium hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                >
+                <button onClick={addSwimlane} className="w-full h-full flex items-center justify-center gap-2 p-3.5 text-sm text-slate-500 font-medium hover:text-blue-600 hover:bg-blue-50 transition-colors">
                   <Plus size={16} /> 新增横向目标
                 </button>
               </td>
@@ -773,7 +769,7 @@ export default function AgileMatrixApp() {
 }
 
 // --- 子组件：可释放的格子容器 ---
-function DroppableCell({ children, sprintId, swimlaneId, onDrop }) {
+function DroppableCell({ children, sprintId, swimlaneId, onDrop, onMouseEnter }) {
   const [isOver, setIsOver] = useState(false);
 
   const handleDragOver = (e) => {
@@ -797,6 +793,7 @@ function DroppableCell({ children, sprintId, swimlaneId, onDrop }) {
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      onMouseEnter={onMouseEnter}
     >
       {children}
     </div>
@@ -804,16 +801,21 @@ function DroppableCell({ children, sprintId, swimlaneId, onDrop }) {
 }
 
 // --- 子组件：可拖拽的卡片 ---
-function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateText, onUpdateResources, onDelete }) {
+function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateText, onUpdateResources, onDelete, onMouseEnter, onMouseLeave }) {
   const [isEditing, setIsEditing] = useState(false);
   const [isEditingResources, setIsEditingResources] = useState(false);
   
-  // 资源表单本地临时状态
-  const [resData, setResData] = useState(task.resources || { fe: '', be: '', qa: '', pd: '' });
+  const [resData, setResData] = useState(task.resources || { fe: '', be: '', qa: '', s: '', j: '' });
   
   const [isOver, setIsOver] = useState(false);
   const inputRef = useRef(null);
+  const popoverRef = useRef(null);
+  const resDataRef = useRef(resData);
 
+  // 保证闭包内获取的是最新的表单数据
+  useEffect(() => { resDataRef.current = resData; }, [resData]);
+
+  // 处理文本编辑时光标居末
   useEffect(() => {
     if (isEditing && inputRef.current) {
       inputRef.current.focus();
@@ -822,6 +824,19 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
       inputRef.current.value = val;
     }
   }, [isEditing]);
+
+  // 全局拦截：鼠标点击空白区域自动保存并关闭资源弹窗
+  useEffect(() => {
+    if (!isEditingResources) return;
+    const handleClickOutside = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setIsEditingResources(false);
+        onUpdateResources(task.id, resDataRef.current);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isEditingResources, task.id, onUpdateResources]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -861,28 +876,23 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
     }
   };
 
-  // 保存资源数据
-  const handleSaveResources = () => {
-    setIsEditingResources(false);
-    onUpdateResources(task.id, resData);
-  };
-
-  // 检测该卡片是否有配置资源
   const hasResources = task.resources && 
     (parseFloat(task.resources.fe || 0) > 0 || 
      parseFloat(task.resources.be || 0) > 0 || 
      parseFloat(task.resources.qa || 0) > 0 || 
-     parseFloat(task.resources.pd || 0) > 0);
+     parseFloat(task.resources.s || 0) > 0 ||
+     parseFloat(task.resources.j || 0) > 0);
 
   return (
     <div
-      // 当处于文本编辑或资源编辑状态时，禁止卡片被拖拽
       draggable={!isEditing && !isEditingResources}
       onDragStart={(e) => onDragStart(e, task)}
       onDragEnd={onDragEnd}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       className={`relative group bg-white border border-slate-300 rounded-lg p-2.5 text-xs text-slate-700 hover:border-blue-400 shadow-sm hover:shadow-md transition-all duration-200
         ${isOver ? 'border-t-[3px] border-t-blue-500' : ''}
         ${(!isEditing && !isEditingResources) ? 'cursor-grab active:cursor-grabbing' : ''}
@@ -911,13 +921,14 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
             </div>
           </div>
           
-          {/* 任务卡片微标区：展示已配置的资源 */}
+          {/* 任务卡片微标区 */}
           {!isEditingResources && hasResources && (
              <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] select-none">
                 {parseFloat(task.resources.fe || 0) > 0 && <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100">前 {task.resources.fe}</span>}
                 {parseFloat(task.resources.be || 0) > 0 && <span className="bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded border border-indigo-100">后 {task.resources.be}</span>}
                 {parseFloat(task.resources.qa || 0) > 0 && <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded border border-emerald-100">测 {task.resources.qa}</span>}
-                {parseFloat(task.resources.pd || 0) > 0 && <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-100">规 {task.resources.pd}</span>}
+                {parseFloat(task.resources.s || 0) > 0 && <span className="bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded border border-purple-100">S {task.resources.s}</span>}
+                {parseFloat(task.resources.j || 0) > 0 && <span className="bg-pink-50 text-pink-600 px-1.5 py-0.5 rounded border border-pink-100">J {task.resources.j}</span>}
              </div>
           )}
         </div>
@@ -926,12 +937,20 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
       {/* 资源配置弹层区 */}
       {isEditingResources && (
         <div 
-          className="mt-3 p-2 bg-slate-50 border border-slate-200 rounded-md"
+          ref={popoverRef}
+          className="mt-3 p-2 bg-slate-50 border border-slate-200 rounded-md shadow-sm"
           onClick={(e) => e.stopPropagation()} 
+          onKeyDown={(e) => {
+             if (e.key === 'Enter') {
+                e.preventDefault();
+                setIsEditingResources(false);
+                onUpdateResources(task.id, resData);
+             }
+          }}
         >
           <div className="flex justify-between items-center mb-2 px-1">
             <span className="font-medium text-slate-600 flex items-center gap-1"><Users size={12}/> 资源排期</span>
-            <button onClick={() => setIsEditingResources(false)} className="text-slate-400 hover:text-slate-600"><X size={14}/></button>
+            <button onClick={() => { setIsEditingResources(false); onUpdateResources(task.id, resData); }} className="text-slate-400 hover:text-slate-600"><X size={14}/></button>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <label className="flex items-center gap-1.5 bg-white p-1 rounded border border-slate-200 focus-within:border-blue-400 transition-colors">
@@ -947,43 +966,28 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
               <input type="number" step="0.1" min="0" placeholder="0" className="w-full outline-none text-slate-700 bg-transparent" value={resData.qa} onChange={e => setResData({...resData, qa: e.target.value})} />
             </label>
             <label className="flex items-center gap-1.5 bg-white p-1 rounded border border-slate-200 focus-within:border-blue-400 transition-colors">
-              <span className="text-slate-400 w-4 font-medium shrink-0">规</span>
-              <input type="number" step="0.1" min="0" placeholder="0" className="w-full outline-none text-slate-700 bg-transparent" value={resData.pd} onChange={e => setResData({...resData, pd: e.target.value})} />
+              <span className="text-slate-400 w-4 font-medium shrink-0">S</span>
+              <input type="number" step="0.1" min="0" placeholder="0" className="w-full outline-none text-slate-700 bg-transparent" value={resData.s} onChange={e => setResData({...resData, s: e.target.value})} />
+            </label>
+            <label className="flex items-center gap-1.5 bg-white p-1 rounded border border-slate-200 focus-within:border-blue-400 transition-colors">
+              <span className="text-slate-400 w-4 font-medium shrink-0">J</span>
+              <input type="number" step="0.1" min="0" placeholder="0" className="w-full outline-none text-slate-700 bg-transparent" value={resData.j} onChange={e => setResData({...resData, j: e.target.value})} />
             </label>
           </div>
-          <button 
-            onClick={handleSaveResources}
-            className="w-full mt-2 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:text-blue-700 py-1 rounded font-medium transition-colors"
-          >
-            确认保存
-          </button>
         </div>
       )}
       
       {/* 悬浮操作栏 */}
       {!isEditing && !isEditingResources && (
         <div className="absolute top-1 right-1 hidden group-hover:flex items-center gap-1 bg-white/95 rounded-md p-1 backdrop-blur-md shadow-md border border-slate-200 z-10">
-           {/* 新增的资源配置按钮 */}
-           <button 
-             onClick={() => setIsEditingResources(true)} 
-             className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors"
-             title="分配资源"
-           >
+           <button onClick={() => setIsEditingResources(true)} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="分配资源">
              <Users size={12} />
            </button>
            <div className="w-[1px] h-3 bg-slate-200"></div>
-           <button 
-             onClick={() => setIsEditing(true)} 
-             className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors"
-             title="编辑文本"
-           >
+           <button onClick={() => setIsEditing(true)} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="编辑文本">
              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
            </button>
-           <button 
-             onClick={() => onDelete(task.id)} 
-             className="text-slate-500 hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
-             title="删除事项"
-           >
+           <button onClick={() => onDelete(task.id)} className="text-slate-500 hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors" title="删除事项">
              <Trash2 size={12} />
            </button>
         </div>
@@ -993,7 +997,7 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
 }
 
 // --- 子组件：通用行内可编辑文本 ---
-function EditableText({ value, onChange, className, placeholder, multiline }) {
+function EditableText({ value, onChange, className, placeholder, multiline, formatAsGoal }) {
   const [isEditing, setIsEditing] = useState(false);
   const [currentValue, setCurrentValue] = useState(value);
   const ref = useRef(null);
@@ -1047,6 +1051,25 @@ function EditableText({ value, onChange, className, placeholder, multiline }) {
         className={`${className} border-2 border-blue-400 bg-white`}
         placeholder={placeholder}
       />
+    );
+  }
+
+  // 特殊排版呈现：目标列（区分大标题和细化的拆解事项）
+  if (formatAsGoal && value) {
+    const lines = value.split('\n');
+    const title = lines[0] || '';
+    const rest = lines.slice(1).join('\n');
+    const isCenter = className.includes('text-center');
+    
+    return (
+      <div 
+        className={`cursor-pointer flex flex-col w-full ${isCenter ? 'text-center items-center' : 'text-left'} ${className}`}
+        onClick={() => setIsEditing(true)}
+        title="点击进行编辑"
+      >
+        <div className={`font-bold text-slate-800 ${className.includes('text-sm') ? 'text-sm' : 'text-[13px]'} leading-tight`}>{title}</div>
+        {rest && <div className={`text-xs text-slate-500 font-normal mt-1 leading-relaxed whitespace-pre-wrap ${isCenter ? 'text-center' : 'text-left'}`}>{rest}</div>}
+      </div>
     );
   }
 
