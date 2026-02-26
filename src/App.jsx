@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter } from 'lucide-react';
+import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera } from 'lucide-react';
 
 // --- 工具函数 ---
 const generateId = () => Math.random().toString(36).substr(2, 9);
@@ -33,6 +33,12 @@ export default function AgileMatrixApp() {
   
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  
+  // --- 新增：自动保存相关状态 ---
+  const [isAutoSaving, setIsAutoSaving] = useState(false);
+  // 改造 lastSaveTime，使其同时记录时间和保存方式 { time: Date, method: 'manual' | 'auto' }
+  const [lastSaveTime, setLastSaveTime] = useState(null);
+
   const [toastMessage, setToastMessage] = useState('');
   
   // 视图筛选状态 (更新了 s 和 j)
@@ -46,6 +52,10 @@ export default function AgileMatrixApp() {
   const [columnWidths, setColumnWidths] = useState({});
   const [history, setHistory] = useState([]);
   const [draggedItem, setDraggedItem] = useState(null);
+
+  // 导出图片与节点引用
+  const matrixRef = useRef(null);
+  const [isExporting, setIsExporting] = useState(false);
 
   // 复制粘贴与焦点追踪 Ref
   const hoveredTaskRef = useRef(null);
@@ -104,6 +114,7 @@ export default function AgileMatrixApp() {
       setData(emptyTemplate);
       setHistory([]);
       setIsDirty(false);
+      setLastSaveTime({ time: new Date(), method: 'manual' });
       showToast('新建文件成功');
     } catch (err) {
       if (err.name !== 'AbortError') alertModal('新建文件失败。错误: ' + err.message);
@@ -125,6 +136,7 @@ export default function AgileMatrixApp() {
         setData(parsed);
         setHistory([]);
         setIsDirty(false);
+        setLastSaveTime(null); // 重置上次保存时间，避免引起歧义
         showToast('打开文件成功');
       } else {
         alertModal('导入失败：文件格式不符合排期矩阵的数据结构。');
@@ -135,7 +147,7 @@ export default function AgileMatrixApp() {
   };
 
   const handleSave = useCallback(async () => {
-    if (!isDirty && fileHandle) return;
+    if ((!isDirty && fileHandle) || isAutoSaving) return; // 拦截冲突
     setIsSaving(true);
     try {
       let handle = fileHandle;
@@ -157,13 +169,94 @@ export default function AgileMatrixApp() {
       await writable.close();
       
       setIsDirty(false);
+      setLastSaveTime({ time: new Date(), method: 'manual' });
       showToast('保存成功');
     } catch (err) {
       if (err.name !== 'AbortError') alertModal('保存失败: ' + err.message);
     } finally {
       setIsSaving(false);
     }
-  }, [data, isDirty, fileHandle, fileName, showToast]);
+  }, [data, isDirty, fileHandle, fileName, showToast, isAutoSaving]);
+
+  // --- 新增：核心自动保存机制 ---
+  const handleAutoSave = useCallback(async () => {
+    // 仅在有改动、已关联本地文件、且没有在进行任何手动/自动保存时才执行
+    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
+
+    setIsAutoSaving(true);
+    try {
+      // 静默检查权限，如果没有权限说明可能过期或被撤销，此时放弃自动保存，等待用户手动点击保存触发弹窗
+      if (await fileHandle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+        setIsAutoSaving(false);
+        return;
+      }
+
+      const writable = await fileHandle.createWritable();
+      await writable.write(JSON.stringify(data, null, 2));
+      await writable.close();
+
+      setIsDirty(false);
+      setLastSaveTime({ time: new Date(), method: 'auto' });
+      // 故意不调用 showToast，实现无感静默保存
+    } catch (err) {
+      console.error('自动保存静默失败:', err);
+    } finally {
+      setIsAutoSaving(false);
+    }
+  }, [data, isDirty, fileHandle, isSaving, isAutoSaving]);
+
+  // --- 新增：导出为图片功能 ---
+  const handleExportImage = async () => {
+    if (!matrixRef.current || isExporting) return;
+    setIsExporting(true);
+    showToast('正在生成高清长图，请稍候...');
+    
+    try {
+      // 改用更现代的 html-to-image 库，完美支持 Tailwind v4 的 oklch 颜色
+      if (!window.htmlToImage) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.11/html-to-image.min.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      }
+      
+      const dataUrl = await window.htmlToImage.toPng(matrixRef.current, {
+        pixelRatio: 2, // 2倍超清渲染
+        backgroundColor: '#f8fafc', // 对应 bg-slate-50
+      });
+      
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      // 使用当前文件名 + 当前日期作为图片名
+      const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
+      const dateStr = new Date().toLocaleDateString().replace(/\//g, '');
+      a.download = `${nameWithoutExt}_${dateStr}.png`;
+      a.click();
+      
+      showToast('图片导出成功！');
+    } catch (err) {
+      console.error('导出图片失败:', err);
+      alertModal('导出图片失败: ' + err.message);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // --- 新增：基于防抖的自动保存触发器 ---
+  useEffect(() => {
+    // 停止操作 3 秒后触发自动保存
+    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
+
+    const timer = setTimeout(() => {
+      handleAutoSave();
+    }, 3000);
+
+    return () => clearTimeout(timer); // 任何键盘输入或数据改变都会清除计时器，重新计时
+  }, [data, isDirty, fileHandle, isSaving, isAutoSaving, handleAutoSave]);
+
 
   const handleUndo = useCallback(() => {
     if (history.length === 0) return;
@@ -516,14 +609,33 @@ export default function AgileMatrixApp() {
         <div className="flex flex-col flex-1">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-slate-800">敏捷全景排期矩阵</h1>
-            {isDirty && (
-              <span className="flex items-center text-orange-600 text-xs font-semibold px-2.5 py-0.5 bg-orange-50 rounded-full border border-orange-200">
-                <AlertCircle size={14} className="mr-1" />未保存
-              </span>
-            )}
+            
+            {/* 新增：状态提示区，支持未保存/自动保存中/已自动保存的优雅切换 */}
+            <div className="flex items-center min-w-[120px]">
+              {isDirty && !isAutoSaving && (
+                <span className="flex items-center text-orange-600 text-xs font-semibold px-2.5 py-0.5 bg-orange-50 rounded-full border border-orange-200">
+                  <AlertCircle size={14} className="mr-1" />未保存
+                </span>
+              )}
+              {isAutoSaving && (
+                <span className="flex items-center text-blue-600 text-xs font-semibold px-2.5 py-0.5 bg-blue-50 rounded-full border border-blue-200">
+                  <svg className="animate-spin -ml-1 mr-1.5 h-3 w-3 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  自动保存中...
+                </span>
+              )}
+              {/* 精准显示最后保存时间和保存方式 */}
+              {!isDirty && lastSaveTime && !isAutoSaving && (
+                <span className="flex items-center text-slate-400 text-xs font-medium px-2.5 py-0.5 animate-fade-in" title={`更新于 ${lastSaveTime.time.toLocaleTimeString()}`}>
+                   ✓ 已{lastSaveTime.method === 'auto' ? '自动' : '手动'}保存 ({lastSaveTime.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})
+                </span>
+              )}
+            </div>
 
             {/* 视图筛选复选框组 */}
-            <div className="flex items-center gap-3 ml-4 pl-4 border-l border-slate-200">
+            <div className="flex items-center gap-3 ml-2 pl-4 border-l border-slate-200">
               <span className="flex items-center gap-1 text-xs text-slate-400 font-medium">
                 <Filter size={12} /> 视图过滤
               </span>
@@ -560,12 +672,16 @@ export default function AgileMatrixApp() {
             <button onClick={handleOpen} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="打开本地 JSON 数据">
               <FolderOpen size={14} /> 打开
             </button>
+            <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+            <button onClick={handleExportImage} disabled={isExporting} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm disabled:opacity-50" title="导出当前完整视图为高清图片">
+              {isExporting ? <svg className="animate-spin h-3.5 w-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Camera size={14} />} 导出
+            </button>
           </div>
 
           <button onClick={handleUndo} disabled={history.length === 0} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg disabled:opacity-30 disabled:hover:bg-transparent transition-colors" title={`撤销 (${IS_MAC ? 'Cmd' : 'Ctrl'}+Z)`}>
             <Undo size={18} />
           </button>
-          <button onClick={handleSave} disabled={!isDirty && fileHandle !== null} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${(!isDirty && fileHandle !== null) ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'}`}>
+          <button onClick={handleSave} disabled={(!isDirty && fileHandle !== null) || isAutoSaving} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${((!isDirty && fileHandle !== null) || isAutoSaving) ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'}`}>
             <Save size={16} />
             {isSaving ? '保存中...' : `保存 (${IS_MAC ? 'Cmd' : 'Ctrl'}+S)`}
           </button>
@@ -582,7 +698,7 @@ export default function AgileMatrixApp() {
 
       {/* Matrix Area */}
       <div className="flex-1 overflow-auto bg-slate-50 relative custom-scrollbar">
-        <table className="w-full border-collapse border-2 border-slate-300 min-w-max">
+        <table ref={matrixRef} className="w-full border-collapse border-2 border-slate-300 min-w-max bg-slate-50">
           <thead className="sticky top-0 z-30">
             {/* Months Row */}
             <tr>
