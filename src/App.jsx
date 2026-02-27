@@ -770,7 +770,7 @@ export default function AgileMatrixApp() {
                       />
                       {/* 迭代资源汇总展示 */}
                       {totalResText ? (
-                        <div className="mt-1 flex items-center gap-1 text-[11px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded font-medium shadow-sm">
+                        <div className="mt-1 flex items-center gap-1 text-[11px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded font-medium shadow-sm whitespace-nowrap">
                            <Users size={10} /> {totalResText}
                         </div>
                       ) : (
@@ -1040,11 +1040,11 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
           {/* 任务卡片微标区 */}
           {!isEditingResources && hasResources && (
              <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] select-none">
-                {parseFloat(task.resources.fe || 0) > 0 && <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100">前 {task.resources.fe}</span>}
-                {parseFloat(task.resources.be || 0) > 0 && <span className="bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded border border-indigo-100">后 {task.resources.be}</span>}
-                {parseFloat(task.resources.qa || 0) > 0 && <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded border border-emerald-100">测 {task.resources.qa}</span>}
-                {parseFloat(task.resources.s || 0) > 0 && <span className="bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded border border-purple-100">S {task.resources.s}</span>}
-                {parseFloat(task.resources.j || 0) > 0 && <span className="bg-pink-50 text-pink-600 px-1.5 py-0.5 rounded border border-pink-100">J {task.resources.j}</span>}
+                {parseFloat(task.resources.fe || 0) > 0 && <span className="whitespace-nowrap bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100">前 {task.resources.fe}</span>}
+                {parseFloat(task.resources.be || 0) > 0 && <span className="whitespace-nowrap bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded border border-indigo-100">后 {task.resources.be}</span>}
+                {parseFloat(task.resources.qa || 0) > 0 && <span className="whitespace-nowrap bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded border border-emerald-100">测 {task.resources.qa}</span>}
+                {parseFloat(task.resources.s || 0) > 0 && <span className="whitespace-nowrap bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded border border-purple-100">S {task.resources.s}</span>}
+                {parseFloat(task.resources.j || 0) > 0 && <span className="whitespace-nowrap bg-pink-50 text-pink-600 px-1.5 py-0.5 rounded border border-pink-100">J {task.resources.j}</span>}
              </div>
           )}
         </div>
