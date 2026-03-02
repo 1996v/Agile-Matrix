@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera } from 'lucide-react';
+import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera, FileDown } from 'lucide-react';
 
 // --- 工具函数 ---
 const generateId = () => Math.random().toString(36).substr(2, 9);
@@ -56,6 +56,7 @@ export default function AgileMatrixApp() {
   // 导出图片与节点引用
   const matrixRef = useRef(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
 
   // 复制粘贴与焦点追踪 Ref
   const hoveredTaskRef = useRef(null);
@@ -205,14 +206,13 @@ export default function AgileMatrixApp() {
     }
   }, [data, isDirty, fileHandle, isSaving, isAutoSaving]);
 
-  // --- 新增：导出为图片功能 ---
+  // --- 导出为图片功能 ---
   const handleExportImage = async () => {
     if (!matrixRef.current || isExporting) return;
     setIsExporting(true);
     showToast('正在生成高清长图，请稍候...');
     
     try {
-      // 改用更现代的 html-to-image 库，完美支持 Tailwind v4 的 oklch 颜色
       if (!window.htmlToImage) {
         await new Promise((resolve, reject) => {
           const script = document.createElement('script');
@@ -230,7 +230,6 @@ export default function AgileMatrixApp() {
       
       const a = document.createElement('a');
       a.href = dataUrl;
-      // 使用当前文件名 + 当前日期作为图片名
       const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
       const dateStr = new Date().toLocaleDateString().replace(/\//g, '');
       a.download = `${nameWithoutExt}_${dateStr}.png`;
@@ -245,16 +244,170 @@ export default function AgileMatrixApp() {
     }
   };
 
-  // --- 新增：基于防抖的自动保存触发器 ---
-  useEffect(() => {
-    // 停止操作 3 秒后触发自动保存
-    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
+  // --- 新增：导出为 Excel 功能 ---
+  const handleExportExcel = async () => {
+    if (isExportingExcel) return;
+    setIsExportingExcel(true);
+    showToast('正在生成 Excel 文件，请稍候...');
 
+    try {
+      // 动态注入 ExcelJS
+      if (!window.ExcelJS) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      }
+
+      const workbook = new window.ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('敏捷排期矩阵');
+
+      // 1. 设置列宽 (将像素宽度粗略转换为 Excel 的字符宽度，比例大约为除以 8)
+      const targetColWidth = columnWidths['targetCol'] || data.targetColumnWidth || 200;
+      worksheet.getColumn(1).width = Math.max(15, targetColWidth / 8);
+
+      data.sprints.forEach((sprint, index) => {
+        const pxWidth = columnWidths[sprint.id] || sprint.width || 256;
+        worksheet.getColumn(index + 2).width = Math.max(15, pxWidth / 8);
+      });
+
+      // 2. 写入第一行：阶段(Months) 和 合并单元格
+      const row1 = worksheet.getRow(1);
+      row1.getCell(1).value = '目标';
+      
+      let currentCol = 2;
+      data.months.forEach(month => {
+        const sprintsInMonth = data.sprints.filter(s => s.monthId === month.id);
+        const colSpan = Math.max(1, sprintsInMonth.length);
+        
+        const cell = row1.getCell(currentCol);
+        // 拼接大阶段标题和阶段描述
+        cell.value = `${month.name}${month.goal ? '\n' + month.goal : ''}`;
+        
+        if (colSpan > 1) {
+          worksheet.mergeCells(1, currentCol, 1, currentCol + colSpan - 1);
+        }
+        currentCol += colSpan;
+      });
+
+      // 3. 写入第二行：迭代(Sprints)
+      const row2 = worksheet.getRow(2);
+      data.sprints.forEach((sprint, index) => {
+        const resText = getSprintTotalResourcesText(sprint.id);
+        row2.getCell(index + 2).value = `${sprint.name}${resText ? '\n[' + resText + ']' : ''}`;
+      });
+      // 将第一列（目标列）的第一行和第二行合并
+      worksheet.mergeCells('A1:A2');
+
+      // 4. 写入数据行：泳道及每个格子里合并后的事项
+      let currentRowIdx = 3;
+      data.swimlanes.forEach(swimlane => {
+        if (swimlane.collapsed) return; // 如果UI上折叠了就不导出
+        
+        const row = worksheet.getRow(currentRowIdx);
+        row.getCell(1).value = swimlane.name;
+
+        data.sprints.forEach((sprint, sIdx) => {
+          const cellTasks = visibleTasks
+            .filter(t => t.sprintId === sprint.id && t.swimlaneId === swimlane.id)
+            .sort((a, b) => a.order - b.order);
+
+          // 将多个卡片转换为一个带有换行的纯文本字符串
+          const taskStrings = cellTasks.map(task => {
+            let text = `${task.order}. ${task.text}`;
+            const r = task.resources;
+            if (r && (r.fe || r.be || r.qa || r.s || r.j)) {
+              const resArr = [];
+              if (parseFloat(r.fe||0) > 0) resArr.push(`前${r.fe}`);
+              if (parseFloat(r.be||0) > 0) resArr.push(`后${r.be}`);
+              if (parseFloat(r.qa||0) > 0) resArr.push(`测${r.qa}`);
+              if (parseFloat(r.s||0) > 0) resArr.push(`S${r.s}`);
+              if (parseFloat(r.j||0) > 0) resArr.push(`J${r.j}`);
+              if (resArr.length > 0) {
+                text += `\n(${resArr.join(' ')})`;
+              }
+            }
+            return text;
+          });
+
+          // 如果该格子有任务，则用双换行符分隔不同的卡片
+          if (taskStrings.length > 0) {
+            row.getCell(sIdx + 2).value = taskStrings.join('\n\n');
+          }
+        });
+        currentRowIdx++;
+      });
+
+      // 5. 统一样式处理 (边框、对齐、自动换行撑开高度、背景色)
+      const maxCol = data.sprints.length + 1;
+      for(let r = 1; r < currentRowIdx; r++) {
+        for(let c = 1; c <= maxCol; c++) {
+          const cell = worksheet.getCell(r, c);
+          // 添加基础边框
+          cell.border = {
+            top: {style:'thin', color: {argb:'FFCBD5E1'}},
+            left: {style:'thin', color: {argb:'FFCBD5E1'}},
+            bottom: {style:'thin', color: {argb:'FFCBD5E1'}},
+            right: {style:'thin', color: {argb:'FFCBD5E1'}}
+          };
+          
+          // 设置文字换行与对齐（确保高度能被换行自动撑开）
+          cell.alignment = {
+            wrapText: true,
+            vertical: 'top', 
+            horizontal: c === 1 ? 'left' : 'left' // 内容默认左对齐方便阅读
+          };
+          
+          // 表头特殊样式（1、2行：灰色背景，居中，加粗）
+          if (r <= 2) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: {argb: 'FFF1F5F9'} // 对应 bg-slate-100
+            };
+            cell.alignment.horizontal = 'center';
+            cell.alignment.vertical = 'middle';
+            cell.font = { bold: true, color: {argb: 'FF334155'} };
+          } 
+          // 左侧泳道标题列样式（加粗）
+          else if (c === 1) {
+            cell.font = { bold: true, color: {argb: 'FF334155'} };
+          }
+        }
+      }
+
+      // 生成文件并触发下载
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
+      const dateStr = new Date().toLocaleDateString().replace(/\//g, '');
+      a.download = `${nameWithoutExt}_${dateStr}.xlsx`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+      showToast('Excel 导出成功！');
+    } catch (err) {
+      console.error('导出 Excel 失败:', err);
+      alertModal('导出 Excel 失败: ' + err.message);
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+  // --- 基于防抖的自动保存触发器 ---
+  useEffect(() => {
+    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
     const timer = setTimeout(() => {
       handleAutoSave();
     }, 3000);
-
-    return () => clearTimeout(timer); // 任何键盘输入或数据改变都会清除计时器，重新计时
+    return () => clearTimeout(timer); 
   }, [data, isDirty, fileHandle, isSaving, isAutoSaving, handleAutoSave]);
 
 
@@ -522,6 +675,29 @@ export default function AgileMatrixApp() {
     });
   };
 
+  // --- 新增：在特定阶段右侧插入新阶段 ---
+  const insertMonthAfter = (targetMonthId) => {
+    updateData(prevData => {
+      const monthIndex = prevData.months.findIndex(m => m.id === targetMonthId);
+      if (monthIndex === -1) return prevData;
+
+      const newMonthId = generateId();
+      const newMonth = { id: newMonthId, name: '新阶段', goal: '阶段核心目标...' };
+      const newSprint = { id: generateId(), monthId: newMonthId, name: '新迭代', width: 256 };
+
+      const newMonths = [...prevData.months];
+      newMonths.splice(monthIndex + 1, 0, newMonth);
+
+      // 找到目标阶段的最后一个迭代的位置，在其后方插入新迭代
+      const lastSprintIndex = prevData.sprints.map(s => s.monthId).lastIndexOf(targetMonthId);
+      const newSprints = [...prevData.sprints];
+      const insertSprintIndex = lastSprintIndex >= 0 ? lastSprintIndex + 1 : newSprints.length;
+      newSprints.splice(insertSprintIndex, 0, newSprint);
+
+      return { ...prevData, months: newMonths, sprints: newSprints };
+    });
+  };
+
   const deleteMonth = (monthId) => {
     confirmModal('确定删除该阶段吗？将同时删除下属的所有迭代及排期事项。', () => {
       updateData(prevData => {
@@ -610,7 +786,7 @@ export default function AgileMatrixApp() {
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-slate-800">敏捷全景排期矩阵</h1>
             
-            {/* 新增：状态提示区，支持未保存/自动保存中/已自动保存的优雅切换 */}
+            {/* 状态提示区 */}
             <div className="flex items-center min-w-[120px]">
               {isDirty && !isAutoSaving && (
                 <span className="flex items-center text-orange-600 text-xs font-semibold px-2.5 py-0.5 bg-orange-50 rounded-full border border-orange-200">
@@ -626,7 +802,6 @@ export default function AgileMatrixApp() {
                   自动保存中...
                 </span>
               )}
-              {/* 精准显示最后保存时间和保存方式 */}
               {!isDirty && lastSaveTime && !isAutoSaving && (
                 <span className="flex items-center text-slate-400 text-xs font-medium px-2.5 py-0.5 animate-fade-in" title={`更新于 ${lastSaveTime.time.toLocaleTimeString()}`}>
                    ✓ 已{lastSaveTime.method === 'auto' ? '自动' : '手动'}保存 ({lastSaveTime.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})
@@ -673,8 +848,12 @@ export default function AgileMatrixApp() {
               <FolderOpen size={14} /> 打开
             </button>
             <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+            {/* 图片与 Excel 导出按钮 */}
             <button onClick={handleExportImage} disabled={isExporting} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm disabled:opacity-50" title="导出当前完整视图为高清图片">
-              {isExporting ? <svg className="animate-spin h-3.5 w-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Camera size={14} />} 导出
+              {isExporting ? <svg className="animate-spin h-3.5 w-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Camera size={14} />} 导图
+            </button>
+            <button onClick={handleExportExcel} disabled={isExportingExcel} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm disabled:opacity-50" title="导出当前视图为 Excel 表格">
+              {isExportingExcel ? <svg className="animate-spin h-3.5 w-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <FileDown size={14} />} 导表
             </button>
           </div>
 
@@ -724,7 +903,8 @@ export default function AgileMatrixApp() {
                            className="outline-none text-center hover:bg-slate-200 rounded px-2 transition-colors"
                         />
                         <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover/month:opacity-100 flex items-center gap-1 transition-opacity">
-                          <button onClick={() => addSprint(month.id)} className="p-1 text-slate-500 hover:text-blue-600 bg-white shadow-sm rounded border border-slate-300" title="新增迭代"><Plus size={14} /></button>
+                          <button onClick={() => addSprint(month.id)} className="p-1 text-slate-500 hover:text-blue-600 bg-white shadow-sm rounded border border-slate-300" title="在当前阶段内新增迭代"><Plus size={14} /></button>
+                          <button onClick={() => insertMonthAfter(month.id)} className="p-1 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 bg-white shadow-sm rounded border border-slate-300" title="在右侧插入新阶段"><Plus size={14} /></button>
                           <button onClick={() => deleteMonth(month.id)} className="p-1 text-slate-500 hover:text-red-500 bg-white shadow-sm rounded border border-slate-300" title="删除该阶段"><Trash2 size={14} /></button>
                         </div>
                       </div>
@@ -742,7 +922,7 @@ export default function AgileMatrixApp() {
                   </th>
                 );
               })}
-              <th className="bg-slate-100 border border-slate-300 w-12 hover:bg-blue-50 cursor-pointer transition-colors group" rowSpan={2} onClick={addMonth} title="新增阶段">
+              <th className="bg-slate-100 border border-slate-300 w-12 hover:bg-blue-50 cursor-pointer transition-colors group" rowSpan={2} onClick={addMonth} title="在最后新增阶段">
                 <div className="flex justify-center items-center h-full text-slate-400 group-hover:text-blue-600"><Plus size={24} /></div>
               </th>
             </tr>
