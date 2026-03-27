@@ -1,5 +1,40 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera, FileDown } from 'lucide-react';
+import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera, FileDown, Globe, HardDrive } from 'lucide-react';
+import { LocalDataService } from './services/LocalDataService.js';
+import { CollaborativeDataService } from './services/CollaborativeDataService.js';
+import TaskLockIndicator from './components/TaskLockIndicator.jsx';
+
+// 生成或获取持久化的用户 ID（每个浏览器唯一）
+function getOrCreateUserId() {
+  let id = localStorage.getItem('agile_matrix_user_id');
+  if (!id) { id = Math.random().toString(36).substr(2, 9); localStorage.setItem('agile_matrix_user_id', id); }
+  return id;
+}
+// 生成或获取持久化的6位数字ID（固定不变，用于显示名称后缀）
+function getOrCreateNumericId() {
+  let id = localStorage.getItem('agile_matrix_numeric_id');
+  if (!id) {
+    id = String(Math.floor(Math.random() * 900000) + 100000);
+    localStorage.setItem('agile_matrix_numeric_id', id);
+  }
+  return id;
+}
+// 获取或初始化用户自定义名称（不含ID后缀）
+function getOrCreateDisplayName() {
+  let name = localStorage.getItem('agile_matrix_display_name');
+  if (!name) {
+    name = '用户';
+    localStorage.setItem('agile_matrix_display_name', name);
+  }
+  return name;
+}
+// 完整用户名 = 自定义名称_6位数字ID
+function buildUserName(displayName, numericId) {
+  return `${displayName}_${numericId}`;
+}
+function saveDisplayName(displayName) {
+  localStorage.setItem('agile_matrix_display_name', displayName);
+}
 
 // --- 工具函数 ---
 const generateId = () => Math.random().toString(36).substr(2, 9);
@@ -30,23 +65,36 @@ const emptyTemplate = {
 // --- 主应用组件 ---
 export default function AgileMatrixApp() {
   const [data, setData] = useState(emptyTemplate);
-  
+
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  
+
   // --- 新增：自动保存相关状态 ---
   const [isAutoSaving, setIsAutoSaving] = useState(false);
   // 改造 lastSaveTime，使其同时记录时间和保存方式 { time: Date, method: 'manual' | 'auto' }
   const [lastSaveTime, setLastSaveTime] = useState(null);
 
   const [toastMessage, setToastMessage] = useState('');
-  
+
   // 视图筛选状态 (更新了 s 和 j)
   const [filters, setFilters] = useState({ fe: true, be: true, qa: true, s: true, j: true });
 
-  // 文件系统状态
-  const [fileHandle, setFileHandle] = useState(null);
+  // 文件系统状态（单机模式）
   const [fileName, setFileName] = useState('未命名排期模板.json');
+
+  // --- 协作模式状态 ---
+  const [mode, setMode] = useState('local'); // 'local' | 'collaborative'
+  const [dataService, setDataService] = useState(() => new LocalDataService());
+  const [locks, setLocks] = useState({}); // { lockKey: { userId, userName } }
+  const numericId = useRef(getOrCreateNumericId());
+  const currentUserId = useRef(getOrCreateUserId()); // 每个浏览器唯一，存 localStorage
+  const [displayName, setDisplayName] = useState(getOrCreateDisplayName);
+  const currentUserName = buildUserName(displayName, numericId.current);
+  // 项目选择弹窗
+  const [projectPickerConfig, setProjectPickerConfig] = useState(null); // null | { projects, svc }
+  // 用户名编辑
+  const [isEditingUserName, setIsEditingUserName] = useState(false);
+  const [userNameInput, setUserNameInput] = useState('');
 
   const [modalConfig, setModalConfig] = useState(null);
   const [columnWidths, setColumnWidths] = useState({});
@@ -62,6 +110,83 @@ export default function AgileMatrixApp() {
   const hoveredTaskRef = useRef(null);
   const hoveredCellRef = useRef(null);
   const copiedTaskRef = useRef(null);
+
+  // --- 协作模式：初始化 DataService 和锁监听 ---
+  useEffect(() => {
+    const svc = dataService;
+    if (mode === 'collaborative') {
+      svc.onLockChange((event) => {
+        if (event.type === 'snapshot') {
+          setLocks(event.locks);
+        } else if (event.type === 'locked') {
+          setLocks(prev => ({ ...prev, [event.taskId]: { userId: event.userId, userName: event.userName } }));
+        } else if (event.type === 'unlocked') {
+          setLocks(prev => { const next = { ...prev }; delete next[event.taskId]; return next; });
+        }
+      });
+      svc.onDataChange((event) => {
+        if (event.type === 'task_updated') {
+          setData(prev => ({
+            ...prev,
+            tasks: prev.tasks.map(t => t.id === event.taskId ? { ...t, ...event.content } : t)
+          }));
+        } else if (event.type === 'project_updated') {
+          setData(event.data);
+        }
+      });
+    }
+    return () => svc.dispose();
+  }, [dataService, mode]);
+
+  // --- 加载协作项目（选中后调用）---
+  const loadCollabProject = useCallback(async (svc, projectId) => {
+    try {
+      const result = await svc.loadProject(projectId);
+      setData(result.data);
+      setFileName(result.fileName || '协作项目');
+      setIsDirty(false);
+      setLastSaveTime(null);
+      if (result.locks) {
+        const lockMap = {};
+        result.locks.forEach(l => { lockMap[l.task_id] = { userId: l.user_id, userName: l.user_name }; });
+        setLocks(lockMap);
+      }
+      // 切换到协作模式
+      dataService.dispose();
+      setDataService(svc);
+      setMode('collaborative');
+      setProjectPickerConfig(null);
+      setToastMessage('已加载项目：' + result.fileName);
+      setTimeout(() => setToastMessage(''), 2000);
+    } catch (err) {
+      alertModal('加载项目失败: ' + err.message);
+    }
+  }, [dataService]);
+
+  // --- 模式切换处理 ---
+  const handleModeSwitch = useCallback(async (newMode) => {
+    if (newMode === mode) return;
+    if (newMode === 'collaborative') {
+      const svc = new CollaborativeDataService(currentUserId.current, currentUserName);
+      try {
+        const projects = await svc.listProjects();
+        // 弹出项目选择弹窗
+        setProjectPickerConfig({ projects, svc });
+      } catch (err) {
+        svc.dispose();
+        alertModal('连接协作服务器失败: ' + err.message + '\n请确认服务器已启动 (cd server && node server.js)');
+      }
+    } else {
+      dataService.dispose();
+      const svc = new LocalDataService();
+      setDataService(svc);
+      setMode('local');
+      setLocks({});
+      setFileName('未命名排期模板.json');
+      setToastMessage('已切换到本地文件模式');
+      setTimeout(() => setToastMessage(''), 2000);
+    }
+  }, [mode, dataService, currentUserName]);
 
   // --- 状态更新与历史记录封装 ---
   const updateData = useCallback((action) => {
@@ -101,18 +226,11 @@ export default function AgileMatrixApp() {
 
   // --- 持久化与文件系统操作 ---
   const handleNew = async () => {
+    if (mode !== 'local') return;
     try {
-      const handle = await window.showSaveFilePicker({
-        types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
-        suggestedName: '新建排期矩阵.json',
-      });
-      const writable = await handle.createWritable();
-      await writable.write(JSON.stringify(emptyTemplate, null, 2));
-      await writable.close();
-      
-      setFileHandle(handle);
-      setFileName(handle.name);
-      setData(emptyTemplate);
+      const result = await dataService.newFile(emptyTemplate);
+      setFileName(result.fileName);
+      setData(result.data);
       setHistory([]);
       setIsDirty(false);
       setLastSaveTime({ time: new Date(), method: 'manual' });
@@ -123,52 +241,42 @@ export default function AgileMatrixApp() {
   };
 
   const handleOpen = async () => {
+    if (mode !== 'local') return;
     try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
-      });
-      const file = await handle.getFile();
-      const content = await file.text();
-      const parsed = JSON.parse(content);
-      
-      if (parsed.months && parsed.sprints && parsed.swimlanes && parsed.tasks) {
-        setFileHandle(handle);
-        setFileName(handle.name);
-        setData(parsed);
-        setHistory([]);
-        setIsDirty(false);
-        setLastSaveTime(null); // 重置上次保存时间，避免引起歧义
-        showToast('打开文件成功');
-      } else {
-        alertModal('导入失败：文件格式不符合排期矩阵的数据结构。');
-      }
+      const result = await dataService.loadProject();
+      setFileName(result.fileName);
+      setData(result.data);
+      setHistory([]);
+      setIsDirty(false);
+      setLastSaveTime(null);
+      showToast('打开文件成功');
     } catch (err) {
       if (err.name !== 'AbortError') alertModal('打开文件失败: ' + err.message);
     }
   };
 
   const handleSave = useCallback(async () => {
-    if ((!isDirty && fileHandle) || isAutoSaving) return; // 拦截冲突
+    if (mode === 'collaborative') {
+      // 协作模式：直接保存到服务器
+      setIsSaving(true);
+      try {
+        await dataService.saveProject(data);
+        setIsDirty(false);
+        setLastSaveTime({ time: new Date(), method: 'manual' });
+        showToast('保存成功');
+      } catch (err) {
+        alertModal('保存失败: ' + err.message);
+      } finally {
+        setIsSaving(false);
+      }
+      return;
+    }
+    // 单机模式
+    if ((!isDirty && dataService.hasFileHandle()) || isAutoSaving) return;
     setIsSaving(true);
     try {
-      let handle = fileHandle;
-      if (!handle) {
-        handle = await window.showSaveFilePicker({
-          types: [{ description: '排期数据文件 (JSON)', accept: { 'application/json': ['.json'] } }],
-          suggestedName: fileName,
-        });
-        setFileHandle(handle);
-        setFileName(handle.name);
-      } else {
-        if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
-          const permission = await handle.requestPermission({ mode: 'readwrite' });
-          if (permission !== 'granted') throw new Error('未获得写入权限');
-        }
-      }
-      const writable = await handle.createWritable();
-      await writable.write(JSON.stringify(data, null, 2));
-      await writable.close();
-      
+      const result = await dataService.saveProject(data, fileName);
+      setFileName(result.fileName);
       setIsDirty(false);
       setLastSaveTime({ time: new Date(), method: 'manual' });
       showToast('保存成功');
@@ -177,34 +285,40 @@ export default function AgileMatrixApp() {
     } finally {
       setIsSaving(false);
     }
-  }, [data, isDirty, fileHandle, fileName, showToast, isAutoSaving]);
+  }, [data, isDirty, dataService, fileName, showToast, isAutoSaving, mode]);
 
   // --- 新增：核心自动保存机制 ---
   const handleAutoSave = useCallback(async () => {
-    // 仅在有改动、已关联本地文件、且没有在进行任何手动/自动保存时才执行
-    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
-
+    if (mode === 'collaborative') {
+      // 协作模式：静默保存到服务器
+      if (!isDirty || isSaving || isAutoSaving) return;
+      setIsAutoSaving(true);
+      try {
+        await dataService.saveProject(data);
+        setIsDirty(false);
+        setLastSaveTime({ time: new Date(), method: 'auto' });
+      } catch (err) {
+        console.error('协作模式自动保存失败:', err);
+      } finally {
+        setIsAutoSaving(false);
+      }
+      return;
+    }
+    // 单机模式
+    if (!isDirty || !dataService.hasFileHandle() || isSaving || isAutoSaving) return;
     setIsAutoSaving(true);
     try {
-      // 静默检查权限，如果没有权限说明可能过期或被撤销，此时放弃自动保存，等待用户手动点击保存触发弹窗
-      if (await fileHandle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
-        setIsAutoSaving(false);
-        return;
+      const saved = await dataService.autoSave(data);
+      if (saved) {
+        setIsDirty(false);
+        setLastSaveTime({ time: new Date(), method: 'auto' });
       }
-
-      const writable = await fileHandle.createWritable();
-      await writable.write(JSON.stringify(data, null, 2));
-      await writable.close();
-
-      setIsDirty(false);
-      setLastSaveTime({ time: new Date(), method: 'auto' });
-      // 故意不调用 showToast，实现无感静默保存
     } catch (err) {
       console.error('自动保存静默失败:', err);
     } finally {
       setIsAutoSaving(false);
     }
-  }, [data, isDirty, fileHandle, isSaving, isAutoSaving]);
+  }, [data, isDirty, dataService, isSaving, isAutoSaving, mode]);
 
   // --- 导出为图片功能 ---
   const handleExportImage = async () => {
@@ -403,12 +517,13 @@ export default function AgileMatrixApp() {
 
   // --- 基于防抖的自动保存触发器 ---
   useEffect(() => {
-    if (!isDirty || !fileHandle || isSaving || isAutoSaving) return;
+    const canAutoSave = mode === 'collaborative' || dataService.hasFileHandle?.();
+    if (!isDirty || !canAutoSave || isSaving || isAutoSaving) return;
     const timer = setTimeout(() => {
       handleAutoSave();
-    }, 3000);
-    return () => clearTimeout(timer); 
-  }, [data, isDirty, fileHandle, isSaving, isAutoSaving, handleAutoSave]);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [data, isDirty, dataService, mode, isSaving, isAutoSaving, handleAutoSave]);
 
 
   const handleUndo = useCallback(() => {
@@ -780,12 +895,81 @@ export default function AgileMatrixApp() {
         </div>
       )}
 
+      {/* 项目选择弹窗 */}
+      {projectPickerConfig && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 border border-slate-200">
+            <h2 className="text-lg font-bold text-slate-800 mb-4">选择协作项目</h2>
+            <div className="space-y-2 max-h-64 overflow-y-auto mb-4">
+              {projectPickerConfig.projects.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => loadCollabProject(projectPickerConfig.svc, p.id)}
+                  className="w-full text-left px-4 py-2 rounded-lg hover:bg-blue-50 border border-slate-200 hover:border-blue-300 transition-colors"
+                >
+                  <div className="font-medium text-slate-800">{p.name}</div>
+                  <div className="text-xs text-slate-500">ID: {p.id}</div>
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  const name = prompt('输入新项目名称：');
+                  if (name?.trim()) {
+                    try {
+                      const id = await projectPickerConfig.svc.createProject(name.trim(), emptyTemplate);
+                      await loadCollabProject(projectPickerConfig.svc, id);
+                    } catch (err) {
+                      alert('创建项目失败：' + err.message);
+                    }
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                新建项目
+              </button>
+              <button
+                onClick={() => {
+                  projectPickerConfig.svc.dispose();
+                  setProjectPickerConfig(null);
+                }}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-300 shadow-sm z-50">
         <div className="flex flex-col flex-1">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-slate-800">敏捷全景排期矩阵</h1>
-            
+
+            {/* 模式切换 */}
+            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-200">
+              <button
+                onClick={() => handleModeSwitch('local')}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${mode === 'local' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                title="单机模式：读写本地 JSON 文件"
+              >
+                <HardDrive size={12} /> 单机
+              </button>
+              <button
+                onClick={() => handleModeSwitch('collaborative')}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${mode === 'collaborative' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                title="协作模式：多人实时协作"
+              >
+                <Globe size={12} /> 协作
+                {mode === 'collaborative' && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                )}
+              </button>
+            </div>
+
             {/* 状态提示区 */}
             <div className="flex items-center min-w-[120px]">
               {isDirty && !isAutoSaving && (
@@ -834,20 +1018,66 @@ export default function AgileMatrixApp() {
           <span className="text-xs text-slate-400 mt-1 flex items-center gap-1 font-medium">
              <div className="w-1.5 h-1.5 rounded-full bg-blue-400"></div>
              {fileName}
+             {mode === 'collaborative' && (
+               <>
+                 <span className="text-blue-400">· 协作中 · 我: </span>
+                 {isEditingUserName ? (
+                  <span className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={userNameInput}
+                      onChange={(e) => setUserNameInput(e.target.value)}
+                      onBlur={() => {
+                        const trimmed = userNameInput.trim();
+                        if (trimmed) {
+                          setDisplayName(trimmed);
+                          saveDisplayName(trimmed);
+                          if (mode === 'collaborative') dataService.userName = buildUserName(trimmed, numericId.current);
+                        }
+                        setIsEditingUserName(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') e.target.blur();
+                        if (e.key === 'Escape') { setUserNameInput(displayName); setIsEditingUserName(false); }
+                      }}
+                      className="bg-white border border-blue-300 rounded px-1 text-blue-600 outline-none w-24"
+                      autoFocus
+                      placeholder="自定义名称"
+                    />
+                    <span className="text-slate-400 text-xs">_{numericId.current}</span>
+                  </span>
+                ) : (
+                  <span
+                    className="text-blue-600 cursor-pointer hover:underline"
+                    onClick={() => {
+                      setUserNameInput(displayName);
+                      setIsEditingUserName(true);
+                    }}
+                    title="点击修改显示名称（ID后缀固定不变）"
+                  >
+                    {currentUserName}
+                  </span>
+                )}
+               </>
+             )}
           </span>
         </div>
-        
+
         <div className="flex items-center gap-2">
-          {/* 文件系统操作按钮组 */}
+          {/* 文件系统操作按钮组（单机模式才显示新建/打开） */}
           <div className="flex items-center bg-slate-100 rounded-lg p-1 mr-2 border border-slate-200">
-            <button onClick={handleNew} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="新建空白排期文件">
-              <FilePlus size={14} /> 新建
-            </button>
-            <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
-            <button onClick={handleOpen} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="打开本地 JSON 数据">
-              <FolderOpen size={14} /> 打开
-            </button>
-            <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+            {mode === 'local' && (
+              <>
+                <button onClick={handleNew} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="新建空白排期文件">
+                  <FilePlus size={14} /> 新建
+                </button>
+                <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+                <button onClick={handleOpen} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="打开本地 JSON 数据">
+                  <FolderOpen size={14} /> 打开
+                </button>
+                <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+              </>
+            )}
             {/* 图片与 Excel 导出按钮 */}
             <button onClick={handleExportImage} disabled={isExporting} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm disabled:opacity-50" title="导出当前完整视图为高清图片">
               {isExporting ? <svg className="animate-spin h-3.5 w-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Camera size={14} />} 导图
@@ -860,7 +1090,7 @@ export default function AgileMatrixApp() {
           <button onClick={handleUndo} disabled={history.length === 0} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg disabled:opacity-30 disabled:hover:bg-transparent transition-colors" title={`撤销 (${IS_MAC ? 'Cmd' : 'Ctrl'}+Z)`}>
             <Undo size={18} />
           </button>
-          <button onClick={handleSave} disabled={(!isDirty && fileHandle !== null) || isAutoSaving} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${((!isDirty && fileHandle !== null) || isAutoSaving) ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'}`}>
+          <button onClick={handleSave} disabled={(mode === 'local' && !isDirty && dataService.hasFileHandle?.()) || isAutoSaving} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${((mode === 'local' && !isDirty && dataService.hasFileHandle?.()) || isAutoSaving) ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/30'}`}>
             <Save size={16} />
             {isSaving ? '保存中...' : `保存 (${IS_MAC ? 'Cmd' : 'Ctrl'}+S)`}
           </button>
@@ -901,6 +1131,10 @@ export default function AgileMatrixApp() {
                            value={month.name} 
                            onChange={(val) => updateGoalText('monthName', month.id, val)}
                            className="outline-none text-center hover:bg-slate-200 rounded px-2 transition-colors"
+                           onLock={mode === 'collaborative' ? () => dataService.lockTask('month:' + month.id) : null}
+                           onUnlock={mode === 'collaborative' ? () => dataService.unlockTask('month:' + month.id) : null}
+                           lockInfo={locks['month:' + month.id]}
+                           currentUserId={currentUserId.current}
                         />
                         <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover/month:opacity-100 flex items-center gap-1 transition-opacity">
                           <button onClick={() => addSprint(month.id)} className="p-1 text-slate-500 hover:text-blue-600 bg-white shadow-sm rounded border border-slate-300" title="在当前阶段内新增迭代"><Plus size={14} /></button>
@@ -916,6 +1150,10 @@ export default function AgileMatrixApp() {
                            placeholder="输入阶段目标..."
                            multiline
                            formatAsGoal={true}
+                           onLock={mode === 'collaborative' ? () => dataService.lockTask('month:' + month.id) : null}
+                           onUnlock={mode === 'collaborative' ? () => dataService.unlockTask('month:' + month.id) : null}
+                           lockInfo={locks['month:' + month.id]}
+                           currentUserId={currentUserId.current}
                         />
                       </div>
                     </div>
@@ -947,6 +1185,10 @@ export default function AgileMatrixApp() {
                          value={sprint.name} 
                          onChange={(val) => updateGoalText('sprint', sprint.id, val)}
                          className="outline-none text-sm font-semibold text-slate-700 text-center hover:bg-slate-200 rounded px-2 transition-colors"
+                         onLock={mode === 'collaborative' ? () => dataService.lockTask('sprint:' + sprint.id) : null}
+                         onUnlock={mode === 'collaborative' ? () => dataService.unlockTask('sprint:' + sprint.id) : null}
+                         lockInfo={locks['sprint:' + sprint.id]}
+                         currentUserId={currentUserId.current}
                       />
                       {/* 迭代资源汇总展示 */}
                       {totalResText ? (
@@ -985,6 +1227,10 @@ export default function AgileMatrixApp() {
                            className="font-bold text-slate-800 text-sm outline-none resize-none bg-transparent hover:bg-slate-100 p-1.5 rounded w-full pr-6"
                            multiline
                            formatAsGoal={true}
+                           onLock={mode === 'collaborative' ? () => dataService.lockTask('swimlane:' + swimlane.id) : null}
+                           onUnlock={mode === 'collaborative' ? () => dataService.unlockTask('swimlane:' + swimlane.id) : null}
+                           lockInfo={locks['swimlane:' + swimlane.id]}
+                           currentUserId={currentUserId.current}
                         />
                         <button onClick={() => deleteSwimlane(swimlane.id)} className="absolute right-0 top-0 opacity-0 group-hover/swimlane:opacity-100 p-1.5 text-slate-400 hover:text-red-500 bg-white rounded shadow-sm border border-slate-300"><Trash2 size={14} /></button>
                       </div>
@@ -1025,6 +1271,10 @@ export default function AgileMatrixApp() {
                                 onDelete={deleteTask}
                                 onMouseEnter={() => hoveredTaskRef.current = task}
                                 onMouseLeave={() => { if(hoveredTaskRef.current?.id === task.id) hoveredTaskRef.current = null; }}
+                                lockInfo={locks[task.id]}
+                                currentUserId={currentUserId.current}
+                                onLock={mode === 'collaborative' ? () => dataService.lockTask(task.id) : null}
+                                onUnlock={mode === 'collaborative' ? () => dataService.unlockTask(task.id) : null}
                               />
                             ))}
                             
@@ -1097,16 +1347,21 @@ function DroppableCell({ children, sprintId, swimlaneId, onDrop, onMouseEnter })
 }
 
 // --- 子组件：可拖拽的卡片 ---
-function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateText, onUpdateResources, onDelete, onMouseEnter, onMouseLeave }) {
+function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateText, onUpdateResources, onDelete, onMouseEnter, onMouseLeave, lockInfo, currentUserId, onLock, onUnlock }) {
   const [isEditing, setIsEditing] = useState(false);
   const [isEditingResources, setIsEditingResources] = useState(false);
-  
+
   const [resData, setResData] = useState(task.resources || { fe: '', be: '', qa: '', s: '', j: '' });
-  
+
   const [isOver, setIsOver] = useState(false);
   const inputRef = useRef(null);
   const popoverRef = useRef(null);
   const resDataRef = useRef(resData);
+
+  // 是否被其他人锁定
+  const isLockedByOther = lockInfo && lockInfo.userId !== currentUserId;
+  // 是否被自己锁定
+  const isLockedByMe = lockInfo && lockInfo.userId === currentUserId;
 
   // 保证闭包内获取的是最新的表单数据
   useEffect(() => { resDataRef.current = resData; }, [resData]);
@@ -1128,6 +1383,7 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
       if (popoverRef.current && !popoverRef.current.contains(e.target)) {
         setIsEditingResources(false);
         onUpdateResources(task.id, resDataRef.current);
+        if (onUnlock) onUnlock();
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -1154,6 +1410,7 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
     if (e.target.value.trim() !== task.text) {
       onUpdateText(task.id, e.target.value);
     }
+    if (onUnlock) onUnlock();
   };
 
   const handleKeyDown = (e) => {
@@ -1181,7 +1438,7 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
 
   return (
     <div
-      draggable={!isEditing && !isEditingResources}
+      draggable={!isEditing && !isEditingResources && !isLockedByOther}
       onDragStart={(e) => onDragStart(e, task)}
       onDragEnd={onDragEnd}
       onDragOver={handleDragOver}
@@ -1191,9 +1448,12 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
       onMouseLeave={onMouseLeave}
       className={`relative group bg-white border border-slate-300 rounded-lg p-2.5 text-xs text-slate-700 hover:border-blue-400 shadow-sm hover:shadow-md transition-all duration-200
         ${isOver ? 'border-t-[3px] border-t-blue-500' : ''}
-        ${(!isEditing && !isEditingResources) ? 'cursor-grab active:cursor-grabbing' : ''}
+        ${(!isEditing && !isEditingResources && !isLockedByOther) ? 'cursor-grab active:cursor-grabbing' : ''}
+        ${isLockedByOther ? 'cursor-not-allowed' : ''}
       `}
     >
+      {/* 锁定覆盖层 */}
+      {isLockedByOther && <TaskLockIndicator userName={lockInfo.userName} />}
       {isEditing ? (
         <textarea
           ref={inputRef}
@@ -1208,10 +1468,14 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
         <div className="flex flex-col">
           <div className="flex items-start gap-1">
             <span className="font-semibold text-slate-400 shrink-0 mt-[1px] select-none">{task.order}.</span>
-            <div 
-              className="flex-1 whitespace-pre-wrap break-words leading-relaxed" 
+            <div
+              className="flex-1 whitespace-pre-wrap break-words leading-relaxed"
               title="双击进行编辑"
-              onDoubleClick={() => setIsEditing(true)}
+              onDoubleClick={() => {
+                if (isLockedByOther) return;
+                setIsEditing(true);
+                if (onLock) onLock();
+              }}
             >
               {task.text}
             </div>
@@ -1241,12 +1505,13 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
                 e.preventDefault();
                 setIsEditingResources(false);
                 onUpdateResources(task.id, resData);
+                if (onUnlock) onUnlock();
              }
           }}
         >
           <div className="flex justify-between items-center mb-2 px-1">
             <span className="font-medium text-slate-600 flex items-center gap-1"><Users size={12}/> 资源排期</span>
-            <button onClick={() => { setIsEditingResources(false); onUpdateResources(task.id, resData); }} className="text-slate-400 hover:text-slate-600"><X size={14}/></button>
+            <button onClick={() => { setIsEditingResources(false); onUpdateResources(task.id, resData); if (onUnlock) onUnlock(); }} className="text-slate-400 hover:text-slate-600"><X size={14}/></button>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <label className="flex items-center gap-1.5 bg-white p-1 rounded border border-slate-200 focus-within:border-blue-400 transition-colors">
@@ -1274,13 +1539,13 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
       )}
       
       {/* 悬浮操作栏 */}
-      {!isEditing && !isEditingResources && (
+      {!isEditing && !isEditingResources && !isLockedByOther && (
         <div className="absolute top-1 right-1 hidden group-hover:flex items-center gap-1 bg-white/95 rounded-md p-1 backdrop-blur-md shadow-md border border-slate-200 z-10">
-           <button onClick={() => setIsEditingResources(true)} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="分配资源">
+           <button onClick={() => { setIsEditingResources(true); if (onLock) onLock(); }} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="分配资源">
              <Users size={12} />
            </button>
            <div className="w-[1px] h-3 bg-slate-200"></div>
-           <button onClick={() => setIsEditing(true)} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="编辑文本">
+           <button onClick={() => { setIsEditing(true); if (onLock) onLock(); }} className="text-slate-500 hover:text-blue-600 p-1 rounded hover:bg-blue-50 transition-colors" title="编辑文本">
              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
            </button>
            <button onClick={() => onDelete(task.id)} className="text-slate-500 hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors" title="删除事项">
@@ -1293,10 +1558,11 @@ function DraggableTask({ task, onDragStart, onDragEnd, onDropOnTask, onUpdateTex
 }
 
 // --- 子组件：通用行内可编辑文本 ---
-function EditableText({ value, onChange, className, placeholder, multiline, formatAsGoal }) {
+function EditableText({ value, onChange, className, placeholder, multiline, formatAsGoal, onLock, onUnlock, lockInfo, currentUserId }) {
   const [isEditing, setIsEditing] = useState(false);
   const [currentValue, setCurrentValue] = useState(value);
   const ref = useRef(null);
+  const isLockedByOther = lockInfo && lockInfo.userId !== currentUserId;
 
   useEffect(() => {
     setCurrentValue(value);
@@ -1312,11 +1578,18 @@ function EditableText({ value, onChange, className, placeholder, multiline, form
     }
   }, [isEditing, multiline]);
 
+  const startEditing = () => {
+    if (isLockedByOther) return;
+    setIsEditing(true);
+    if (onLock) onLock();
+  };
+
   const handleBlur = () => {
     setIsEditing(false);
     if (currentValue !== value) {
       onChange(currentValue);
     }
+    if (onUnlock) onUnlock();
   };
 
   const handleChange = (e) => {
@@ -1358,10 +1631,10 @@ function EditableText({ value, onChange, className, placeholder, multiline, form
     const isCenter = className.includes('text-center');
     
     return (
-      <div 
-        className={`cursor-pointer flex flex-col w-full ${isCenter ? 'text-center items-center' : 'text-left'} ${className}`}
-        onClick={() => setIsEditing(true)}
-        title="点击进行编辑"
+      <div
+        className={`cursor-pointer flex flex-col w-full ${isCenter ? 'text-center items-center' : 'text-left'} ${className}${isLockedByOther ? ' ring-2 ring-red-400 rounded pointer-events-none' : ''}`}
+        onClick={startEditing}
+        title={isLockedByOther ? `${lockInfo.userName} 编辑中` : '点击进行编辑'}
       >
         <div className={`font-bold text-slate-800 ${className.includes('text-sm') ? 'text-sm' : 'text-[13px]'} leading-tight`}>{title}</div>
         {rest && <div className={`text-xs text-slate-500 font-normal mt-1 leading-relaxed whitespace-pre-wrap ${isCenter ? 'text-center' : 'text-left'}`}>{rest}</div>}
@@ -1370,10 +1643,10 @@ function EditableText({ value, onChange, className, placeholder, multiline, form
   }
 
   return (
-    <div 
-      className={`whitespace-pre-wrap cursor-pointer ${className} min-h-[1.5em]`}
-      onClick={() => setIsEditing(true)}
-      title="点击进行编辑"
+    <div
+      className={`whitespace-pre-wrap cursor-pointer ${className} min-h-[1.5em]${isLockedByOther ? ' ring-2 ring-red-400 rounded pointer-events-none' : ''}`}
+      onClick={startEditing}
+      title={isLockedByOther ? `${lockInfo.userName} 编辑中` : '点击进行编辑'}
     >
       {value || <span className="text-slate-400 italic font-normal">{placeholder}</span>}
     </div>
