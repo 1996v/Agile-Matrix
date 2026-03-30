@@ -113,6 +113,11 @@ export class CollaborativeDataService extends DataService {
     return json.id;
   }
 
+  async deleteProject(projectId) {
+    const res = await fetch(`${SERVER_URL}/api/project/${projectId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('删除项目失败');
+  }
+
   async loadProject(projectId) {
     const res = await fetch(`${SERVER_URL}/api/project/${projectId}`);
     if (!res.ok) throw new Error('加载项目失败');

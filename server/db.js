@@ -35,6 +35,7 @@ const getAllProjects = db.prepare('SELECT id, name FROM projects ORDER BY id');
 const getProject = db.prepare('SELECT * FROM projects WHERE id = ?');
 const createProject = db.prepare('INSERT INTO projects (name, data) VALUES (?, ?)');
 const saveProject = db.prepare('UPDATE projects SET data = ?, name = ? WHERE id = ?');
+const deleteProject = db.prepare('DELETE FROM projects WHERE id = ?');
 
 // --- 锁操作 ---
 const getLocksByProject = db.prepare('SELECT * FROM locks WHERE project_id = ?');
@@ -64,6 +65,9 @@ module.exports = {
   },
   saveProject: (id, name, data) => {
     saveProject.run(JSON.stringify(data), name, id);
+  },
+  deleteProject: (id) => {
+    deleteProject.run(id);
   },
   getLocksByProject: (projectId) => getLocksByProject.all(projectId),
   lockTask: (taskId, projectId, userId, userName) => {

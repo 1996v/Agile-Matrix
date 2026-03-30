@@ -64,6 +64,16 @@ app.put('/api/project/:id', (req, res) => {
   }
 });
 
+app.delete('/api/project/:id', (req, res) => {
+  try {
+    const projectId = parseInt(req.params.id);
+    db.deleteProject(projectId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- WebSocket 连接管理 ---
 // clients: userId -> { ws, projectId }
 const clients = new Map();

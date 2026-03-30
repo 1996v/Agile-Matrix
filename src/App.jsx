@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera, FileDown, Globe, HardDrive } from 'lucide-react';
+import { Save, Plus, ChevronDown, ChevronRight, Undo, AlertCircle, Trash2, FilePlus, FolderOpen, Users, X, Filter, Camera, FileDown, Globe, HardDrive, Upload } from 'lucide-react';
 import { LocalDataService } from './services/LocalDataService.js';
 import { CollaborativeDataService } from './services/CollaborativeDataService.js';
 import TaskLockIndicator from './components/TaskLockIndicator.jsx';
@@ -515,6 +515,17 @@ export default function AgileMatrixApp() {
     }
   };
 
+  // --- 单机模式导出 JSON ---
+  const handleExportJson = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (fileName.replace(/\.json$/i, '') || '排期数据') + '_' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // --- 基于防抖的自动保存触发器 ---
   useEffect(() => {
     const canAutoSave = mode === 'collaborative' || dataService.hasFileHandle?.();
@@ -901,15 +912,34 @@ export default function AgileMatrixApp() {
           <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 border border-slate-200">
             <h2 className="text-lg font-bold text-slate-800 mb-4">选择协作项目</h2>
             <div className="space-y-2 max-h-64 overflow-y-auto mb-4">
+              {projectPickerConfig.projects.length === 0 && (
+                <p className="text-sm text-slate-400 text-center py-4">暂无项目，请新建或导入</p>
+              )}
               {projectPickerConfig.projects.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => loadCollabProject(projectPickerConfig.svc, p.id)}
-                  className="w-full text-left px-4 py-2 rounded-lg hover:bg-blue-50 border border-slate-200 hover:border-blue-300 transition-colors"
-                >
-                  <div className="font-medium text-slate-800">{p.name}</div>
-                  <div className="text-xs text-slate-500">ID: {p.id}</div>
-                </button>
+                <div key={p.id} className="flex items-center gap-2">
+                  <button
+                    onClick={() => loadCollabProject(projectPickerConfig.svc, p.id)}
+                    className="flex-1 text-left px-4 py-2 rounded-lg hover:bg-blue-50 border border-slate-200 hover:border-blue-300 transition-colors"
+                  >
+                    <div className="font-medium text-slate-800">{p.name}</div>
+                    <div className="text-xs text-slate-500">ID: {p.id}</div>
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm(`确认删除项目「${p.name}」？此操作不可恢复。`)) return;
+                      try {
+                        await projectPickerConfig.svc.deleteProject(p.id);
+                        setProjectPickerConfig(prev => ({ ...prev, projects: prev.projects.filter(x => x.id !== p.id) }));
+                      } catch (err) {
+                        alert('删除失败：' + err.message);
+                      }
+                    }}
+                    className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+                    title="删除项目"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               ))}
             </div>
             <div className="flex gap-3">
@@ -925,16 +955,46 @@ export default function AgileMatrixApp() {
                     }
                   }
                 }}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
               >
                 新建项目
+              </button>
+              <button
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.accept = '.json,application/json';
+                  input.onchange = async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    try {
+                      const text = await file.text();
+                      const importedData = JSON.parse(text);
+                      if (!importedData.months || !importedData.sprints || !importedData.swimlanes || !importedData.tasks) {
+                        alert('JSON 格式不正确，缺少必要字段');
+                        return;
+                      }
+                      const defaultName = file.name.replace(/\.json$/i, '');
+                      const name = prompt('输入导入后的项目名称：', defaultName);
+                      if (!name?.trim()) return;
+                      const id = await projectPickerConfig.svc.createProject(name.trim(), importedData);
+                      await loadCollabProject(projectPickerConfig.svc, id);
+                    } catch (err) {
+                      alert('导入失败：' + err.message);
+                    }
+                  };
+                  input.click();
+                }}
+                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors font-medium text-sm flex items-center justify-center gap-1.5"
+              >
+                <Upload size={14} /> 导入 JSON
               </button>
               <button
                 onClick={() => {
                   projectPickerConfig.svc.dispose();
                   setProjectPickerConfig(null);
                 }}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium"
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium text-sm"
               >
                 取消
               </button>
@@ -1074,6 +1134,10 @@ export default function AgileMatrixApp() {
                 <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
                 <button onClick={handleOpen} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="打开本地 JSON 数据">
                   <FolderOpen size={14} /> 打开
+                </button>
+                <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
+                <button onClick={handleExportJson} className="flex items-center gap-1.5 px-3 py-1.5 text-slate-600 hover:text-blue-600 hover:bg-white rounded-md transition-all font-medium text-xs shadow-sm" title="导出当前数据为 JSON 文件">
+                  <FileDown size={14} /> 导出
                 </button>
                 <div className="w-[1px] h-4 bg-slate-300 mx-1"></div>
               </>
